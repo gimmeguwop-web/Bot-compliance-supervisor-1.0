@@ -1,0 +1,111 @@
+profile_id: "gost_2.104_basic"
+name: "ГОСТ 2.104-2006: Основная надпись"
+description: "Проверка наличия и заполнения основных граф штампа для чертежей и текстовых документов"
+version: "1.0"
+applicable_formats: ["A4", "A3", "A2", "A1", "A0"]
+
+rules:
+  # Геометрические проверки
+  - id: "frame_presence"
+    type: "cv_geometry"
+    severity: "error"
+    description: "Наличие внешней рамки формата"
+    params:
+      margin_top_mm: 20
+      margin_left_mm: 20
+      margin_right_mm: 10
+      margin_bottom_mm: 10
+      tolerance_px: 5
+      line_thickness_px: 1
+
+  - id: "title_block_position"
+    type: "cv_geometry"
+    severity: "error"
+    description: "Расположение основной надписи (правый нижний угол)"
+    params:
+      width_mm: 185
+      height_mm: 55
+      position: "bottom_right"
+      tolerance_mm: 2
+
+  # Проверки содержания штампа
+  - id: "signature_developer"
+    type: "ocr_text"
+    severity: "error"
+    description: "Подпись 'Разработал'"
+    params:
+      field_name: "Разраб."
+      required: true
+      check_signature_image: true
+      min_confidence: 0.7
+
+  - id: "signature_checker"
+    type: "ocr_text"
+    severity: "error"
+    description: "Подпись 'Проверил'"
+    params:
+      field_name: "Пров."
+      required: true
+      check_signature_image: true
+      min_confidence: 0.7
+
+  - id: "signature_norm_controller"
+    type: "ocr_text"
+    severity: "warning"
+    description: "Подпись 'Н.контролёр' (при наличии)"
+    params:
+      field_name: "Н.контр."
+      required: false
+      check_signature_image: true
+      min_confidence: 0.6
+
+  - id: "document_name"
+    type: "ocr_text"
+    severity: "error"
+    description: "Наименование изделия/документа"
+    params:
+      field_name: "Наименование"
+      required: true
+      min_length: 3
+      max_length: 200
+
+  - id: "document_code"
+    type: "ocr_text"
+    severity: "error"
+    description: "Обозначение документа"
+    params:
+      field_name: "Обозначение"
+      required: true
+      pattern: "^[А-ЯA-Z]{2,4}\\s?\\d{4}\\s?\\.\\s?\\d{2}\\s?\\.\\s?[А-ЯA-Z]{2,3}$" # Примерный шаблон
+
+  - id: "scale_check"
+    type: "ocr_text"
+    severity: "warning"
+    description: "Масштаб (для чертежей)"
+    params:
+      field_name: "Масштаб"
+      required: false
+      allowed_values: ["1:1", "1:2", "1:5", "1:10", "2:1", "5:1", "10:1"]
+
+  - id: "format_check"
+    type: "ocr_text"
+    severity: "error"
+    description: "Формат листа"
+    params:
+      field_name: "Формат"
+      required: true
+      allowed_values: ["A0", "A1", "A2", "A3", "A4"]
+
+  - id: "sheet_number"
+    type: "ocr_text"
+    severity: "error"
+    description: "Номер листа"
+    params:
+      field_name: "Лист"
+      required: true
+      pattern: "^\\d+\\s+из\\s+\\d+$"
+
+metadata:
+  gost_reference: "https://docs.cntd.ru/document/1200046869"
+  last_updated: "2024-01-01"
+  author: "ESKD Validator Team"
