@@ -1,0 +1,56 @@
+profile_id: "gost_2.105_text"
+name: "ГОСТ 2.105-95: Текстовые документы"
+description: "Правила оформления текстовых конструкторских документов (пояснительные записки, ТУ)"
+version: "1.0"
+applicable_formats: ["A4"]
+
+rules:
+  - id: "page_margins"
+    type: "cv_geometry"
+    severity: "error"
+    description: "Поля страницы"
+    params:
+      margin_top_mm: 20
+      margin_left_mm: 20
+      margin_right_mm: 10
+      margin_bottom_mm: 10
+      tolerance_mm: 2
+
+  - id: "font_size_main"
+    type: "ocr_style"
+    severity: "warning"
+    description: "Размер шрифта основного текста"
+    params:
+      min_pt: 12
+      max_pt: 14
+      font_family: ["Times New Roman", "Arial"]
+
+  - id: "paragraph_indent"
+    type: "ocr_style"
+    severity: "warning"
+    description: "Абзацный отступ"
+    params:
+      indent_mm: 15
+      tolerance_mm: 2
+
+  - id: "section_numbering"
+    type: "regex"
+    severity: "error"
+    description: "Нумерация разделов"
+    params:
+      pattern: "^\\d+(\\.\\d+)*\\s+[А-ЯA-Z]"
+      required_sections: ["1", "2"]
+
+  - id: "table_formatting"
+    type: "cv_table"
+    severity: "warning"
+    description: "Оформление таблиц"
+    params:
+      header_repeat: true
+      border_style: "solid"
+      min_cell_height_mm: 7
+
+metadata:
+  gost_reference: "https://docs.cntd.ru/document/120000363"
+  last_updated: "2024-01-01"
+  author: "ESKD Validator Team"

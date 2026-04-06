@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eskd-validator"
+version = "0.1.0"
+description = "Production-ready system for batch validation of engineering documentation against ESKD and GOST standards."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "AI Architect Team", email = "dev@example.com" }
+]
+keywords = ["eskd", "gost", "pdf", "ocr", "validation", "engineering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Framework :: FastAPI",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+dependencies = [
+    # Web Framework
+    "fastapi>=0.109.0,<1.0.0",
+    "uvicorn[standard]>=0.27.0,<1.0.0",
+    "python-multipart>=0.0.6,<1.0.0",
+    
+    # Task Queue
+    "celery[redis]>=5.3.0,<6.0.0",
+    "redis>=5.0.0,<6.0.0",
+    
+    # Database & ORM
+    "sqlmodel>=0.0.14,<1.0.0",
+    "psycopg2-binary>=2.9.9,<3.0.0",
+    "alembic>=1.13.0,<2.0.0",
+    
+    # PDF Processing
+    "pymupdf>=1.23.0,<2.0.0",
+    "pdfplumber>=0.10.0,<1.0.0",
+    
+    # Computer Vision & OCR
+    "opencv-python-headless>=4.9.0,<5.0.0",
+    "ultralytics>=8.1.0,<9.0.0",  # YOLOv8
+    "easyocr>=1.7.0,<2.0.0",
+    "pillow>=10.2.0,<11.0.0",
+    
+    # LLM Integration
+    "langchain>=0.1.0,<1.0.0",
+    "langchain-openai>=0.0.5,<1.0.0",
+    "langchain-community>=0.0.10,<1.0.0",
+    "httpx>=0.26.0,<1.0.0",
+    
+    # Export & Data
+    "python-docx>=1.1.0,<2.0.0",
+    "openpyxl>=3.1.2,<4.0.0",
+    "pandas>=2.2.0,<3.0.0",
+    
+    # Configuration & Validation
+    "pyyaml>=6.0.1,<7.0.0",
+    "pydantic-settings>=2.1.0,<3.0.0",
+    "pydantic>=2.5.0,<3.0.0",
+    
+    # Logging & Utilities
+    "structlog>=24.1.0,<25.0.0",
+    "loguru>=0.7.2,<1.0.0",
+    "python-dotenv>=1.0.0,<2.0.0",
+    "aiofiles>=23.2.1,<24.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",
+    "pytest-cov>=4.1.0,<5.0.0",
+    "httpx>=0.26.0,<1.0.0",
+    "factory-boy>=3.3.0,<4.0.0",
+    "ruff>=0.1.14,<1.0.0",
+    "black>=24.1.0,<25.0.0",
+    "mypy>=1.8.0,<2.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests"]

@@ -1,0 +1,135 @@
+version: "3.9"
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: eskd_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eskd_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password}
+      POSTGRES_DB: ${POSTGRES_DB:-eskd_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eskd_admin}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eskd_network
+
+  # Redis Broker & Backend
+  redis:
+    image: redis:7-alpine
+    container_name: eskd_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eskd_network
+
+  # FastAPI Backend (API Gateway)
+  api:
+    build:
+      context: ./backend
+      dockerfile: ../docker/api.Dockerfile
+    container_name: eskd_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - ./configs:/app/configs
+      - ./uploads:/app/uploads
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eskd_admin}:${POSTGRES_PASSWORD:-secure_password}@db:5432/${POSTGRES_DB:-eskd_db}
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - eskd_network
+
+  # Celery Workers (Processing Pool)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: ../docker/worker.Dockerfile
+    container_name: eskd_worker
+    # Concurrency tuned for CPU-bound tasks (OCR/CV)
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --pool=solo
+    volumes:
+      - ./backend:/app
+      - ./configs:/app/configs
+      - ./uploads:/app/uploads
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-eskd_admin}:${POSTGRES_PASSWORD:-secure_password}@db:5432/${POSTGRES_DB:-eskd_db}
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      - OCR_LANG=${OCR_LANG:-ru,en}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    networks:
+      - eskd_network
+
+  # Celery Beat (Scheduled Tasks - optional for now)
+  beat:
+    build:
+      context: ./backend
+      dockerfile: ../docker/worker.Dockerfile
+    container_name: eskd_beat
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    depends_on:
+      - redis
+    networks:
+      - eskd_network
+
+  # Frontend (React + Vite)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/frontend.Dockerfile
+    container_name: eskd_frontend
+    command: npm run dev -- --host 0.0.0.0
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/package.json:/app/package.json
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    ports:
+      - "3000:5173"
+    depends_on:
+      - api
+    networks:
+      - eskd_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads:
+
+networks:
+  eskd_network:
+    driver: bridge
