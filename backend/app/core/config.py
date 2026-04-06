@@ -33,10 +33,13 @@ class Settings(BaseSettings):
     S3_SECRET_KEY: Optional[str] = None
 
     # LLM
-    LLM_PROVIDER: str = "ollama"  # ollama or openai
+    LLM_ENABLED: bool = True
+    LLM_PROVIDER: str = "mock"  # mock, ollama or openai
     LLM_BASE_URL: str = "http://host.docker.internal:11434/v1"
     LLM_MODEL_NAME: str = "mistral:7b-instruct-v0.3-q4_K_M"
     LLM_API_KEY: Optional[str] = None
+    LLM_MAX_TOKENS: int = 2000
+    LLM_TEMPERATURE: float = 0.1
 
     # OCR/CV
     OCR_LANG: str = "ru,en"
