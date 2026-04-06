@@ -1,311 +1,244 @@
 """
 Celery tasks for document validation pipeline.
-
-Implements the main processing workflow:
-1. Parse PDF
-2. Run rule engine
-3. Perform OCR/CV checks
-4. LLM semantic analysis (optional)
-5. Generate reports
+Orchestrates parsing, rule checking, CV/OCR, LLM analysis, and report generation.
 """
-from typing import Any, Dict, List
-from celery import chain, group
-from app.workers.celery_app import celery_app
-from app.core.logging import get_logger
+import asyncio
+from datetime import datetime
+from typing import Dict, Any, List
+from celery import Task
+from app.core.logger import logger
+from app.db.session import SessionLocal
+from app.models.document import Document, ValidationTask, TaskStatus, ValidationResult
+from app.engines.parser.pdf_parser import PDFParser
+from app.engines.rules.rule_engine import RuleEngine
+from app.engines.vision.signature_detector import SignatureDetector
+from app.engines.llm.analyzer import LLMAnalyzer
+from app.engines.export.report_generator import ReportGenerator
+from app.api.routes.websockets import broadcast_task_update
 from app.core.config import settings
 
-logger = get_logger(__name__)
+from .celery_app import celery_app
 
 
-@celery_app.task(bind=True, max_retries=3)
-def process_document_task(self, task_id: int, profile_id: str):
+class ValidationTaskBase(Task):
+    """Base task with database session."""
+    _db = None
+    
+    @property
+    def db(self):
+        if self._db is None:
+            self._db = SessionLocal()
+        return self._db
+    
+    def after_return(self, *args, **kwargs):
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+
+
+@celery_app.task(base=ValidationTaskBase, bind=True)
+async def validate_document_task(self, task_id: int, document_id: int, profile_id: str):
     """
-    Main task orchestrating the full validation pipeline.
+    Main validation task that orchestrates the entire pipeline.
     
-    Args:
-        task_id: ID of the ValidationTask in database
-        profile_id: ID of the ESKD profile to use (e.g., "gost_2.104_basic")
+    Pipeline stages:
+    1. Parse PDF (extract text, metadata, coordinates)
+    2. Run rule-based checks (ESKD/GOST)
+    3. Detect signatures and stamps (CV + OCR)
+    4. LLM semantic analysis (if enabled)
+    5. Generate reports (DOCX + XLSX)
+    6. Update task status and results
     """
-    try:
-        logger.info(f"Starting validation task {task_id} with profile {profile_id}")
-        
-        # Update task status to PROCESSING
-        # This would interact with the database via a service layer
-        # For now, we'll implement the core logic in subsequent phases
-        
-        # Step 1: Parse PDF and extract metadata
-        parse_result = parse_pdf_task.delay(task_id)
-        
-        # Step 2: Run rule engine checks
-        rule_checks = run_rule_engine_task.si(task_id, profile_id)
-        
-        # Step 3: CV/OCR checks for signatures and stamps
-        cv_checks = run_cv_ocr_task.si(task_id, profile_id)
-        
-        # Step 4: LLM semantic analysis (if enabled)
-        llm_analysis = run_llm_analysis_task.si(task_id)
-        
-        # Step 5: Compile results and update task status
-        finalize_task = compile_results_task.si(task_id)
-        
-        # Chain the tasks
-        workflow = chain(
-            parse_result,
-            rule_checks,
-            cv_checks,
-            llm_analysis,
-            finalize_task
-        )
-        
-        result = workflow.apply_async()
-        
-        return {"status": "started", "workflow_id": result.id}
-        
-    except Exception as exc:
-        logger.error(f"Error starting validation task {task_id}: {exc}")
-        raise self.retry(exc=exc, countdown=60)
-
-
-@celery_app.task
-def parse_pdf_task(task_id: int) -> Dict[str, Any]:
-    """Parse PDF document and extract text/metadata."""
-    logger.info(f"Parsing PDF for task {task_id}")
+    db = self.db
     
-    from app.db.session import get_db_session
-    from app.engines.parser.pdf_parser import PDFParser
-    from app.services.document_service import DocumentService
+    # Get task and document from DB
+    task = db.query(ValidationTask).filter(ValidationTask.id == task_id).first()
+    document = db.query(Document).filter(Document.id == document_id).first()
+    
+    if not task or not document:
+        logger.error(f"Task {task_id} or Document {document_id} not found")
+        return {"error": "Task or Document not found"}
+    
+    # Update task status to processing
+    task.status = TaskStatus.PROCESSING
+    task.progress = 0
+    db.commit()
+    
+    all_results: List[Dict[str, Any]] = []
+    metadata = {
+        "task_id": str(task.id),
+        "timestamp": datetime.now(),
+        "profile": profile_id,
+        "document_name": document.original_filename
+    }
     
     try:
-        db = next(get_db_session())
-        
-        # Get task and document info
-        doc_service = DocumentService(db)
-        task_data = doc_service.get_task_info(task_id)
-        
-        if not task_data:
-            raise ValueError(f"Task {task_id} not found")
-        
-        file_path = task_data["file_path"]
-        document_id = task_data["document_id"]
-        
-        # Parse PDF
-        parser = PDFParser()
-        parsed_doc = parser.parse(file_path)
-        
-        # Save parsed data to database
-        doc_service.save_parsed_data(document_id, parsed_doc)
-        
-        logger.info(f"Successfully parsed PDF for task {task_id}: {parsed_doc.page_count} pages")
-        
-        return {"status": "parsed", "pages": parsed_doc.page_count}
-        
-    except Exception as e:
-        logger.error(f"Failed to parse PDF for task {task_id}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-@celery_app.task
-def run_rule_engine_task(task_id: int, profile_id: str) -> Dict[str, Any]:
-    """Run ESKD/GOST rule checks."""
-    logger.info(f"Running rule engine for task {task_id}, profile {profile_id}")
-    
-    from app.db.session import get_db_session
-    from app.engines.rules.loader import RuleLoader
-    from app.engines.rules.validator import RuleValidator
-    from app.services.document_service import DocumentService
-    
-    try:
-        db = next(get_db_session())
-        doc_service = DocumentService(db)
-        
-        # Get parsed document data
-        parsed_doc = doc_service.get_parsed_data(task_id)
-        if not parsed_doc:
-            raise ValueError(f"No parsed data found for task {task_id}")
-        
-        # Load rules profile
-        loader = RuleLoader()
-        profile = loader.load_profile(profile_id)
-        
-        if not profile:
-            logger.warning(f"Profile {profile_id} not found, using default")
-            profile = loader.load_profile("gost_2.105_basic")
-        
-        # Run validation
-        validator = RuleValidator()
-        results = validator.validate(parsed_doc, profile)
-        
-        # Save results to database
-        doc_service.save_validation_results(task_id, results)
-        
-        logger.info(f"Rule engine completed: {len(results)} checks performed")
-        
-        return {"status": "rules_checked", "checks_count": len(results)}
-        
-    except Exception as e:
-        logger.error(f"Rule engine failed for task {task_id}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-@celery_app.task
-def run_cv_ocr_task(task_id: int, profile_id: str) -> Dict[str, Any]:
-    """Run computer vision and OCR checks for signatures and stamps."""
-    logger.info(f"Running CV/OCR for task {task_id}")
-    
-    from app.db.session import get_db_session
-    from app.engines.vision.detector import SignatureDetector
-    from app.engines.vision.ocr_engine import OCREngine
-    from app.engines.vision.validator import SignatureValidator
-    from app.services.document_service import DocumentService
-    
-    try:
-        db = next(get_db_session())
-        doc_service = DocumentService(db)
-        
-        # Get parsed document data
-        parsed_doc = doc_service.get_parsed_data(task_id)
-        if not parsed_doc:
-            raise ValueError(f"No parsed data found for task {task_id}")
-        
-        # Detect signature zones
-        detector = SignatureDetector()
-        detected_zones = detector.detect(parsed_doc.file_path)
-        
-        # Run OCR on detected zones
-        ocr_engine = OCREngine(lang=settings.OCR_LANG.split(","))
-        ocr_results = []
-        for zone in detected_zones:
-            text = ocr_engine.recognize(zone.image)
-            zone.text = text
-            ocr_results.append(zone)
-        
-        # Validate signatures (check required roles)
-        validator = SignatureValidator()
-        validation_results = validator.validate_signatures(ocr_results, profile_id)
-        
-        # Update parsed_doc with signature data
-        parsed_doc.signatures = ocr_results
-        
-        # Save results
-        doc_service.save_parsed_data(task_id, parsed_doc)  # Update signatures
-        doc_service.save_validation_results(task_id, validation_results)
-        
-        logger.info(f"CV/OCR completed: {len(ocr_results)} signatures detected")
-        
-        return {"status": "cv_ocr_complete", "signatures_found": len(ocr_results)}
-        
-    except Exception as e:
-        logger.error(f"CV/OCR failed for task {task_id}: {e}")
-        raise
-    finally:
-        db.close()
-
-
-@celery_app.task
-def run_llm_analysis_task(task_id: int) -> Dict[str, Any]:
-    """Run LLM semantic analysis."""
-    logger.info(f"Running LLM analysis for task {task_id}")
-    
-    from app.db.session import get_db_session
-    from app.engines.llm.provider import get_llm_provider
-    from app.engines.llm.analyzer import LLMAnalyzer
-    from app.services.document_service import DocumentService
-    
-    try:
-        db = next(get_db_session())
-        doc_service = DocumentService(db)
-        
-        # Check if LLM is enabled
-        if not settings.LLM_ENABLED:
-            logger.info("LLM analysis disabled, skipping")
-            return {"status": "llm_disabled"}
-        
-        # Get parsed document and existing results
-        parsed_doc = doc_service.get_parsed_data(task_id)
-        if not parsed_doc:
-            raise ValueError(f"No parsed data found for task {task_id}")
-        
-        existing_results = doc_service.get_validation_results(task_id)
-        
-        # Initialize LLM provider
-        llm_provider = get_llm_provider(
-            provider_type=settings.LLM_PROVIDER,
-            base_url=settings.LLM_BASE_URL,
-            model_name=settings.LLM_MODEL_NAME,
-            api_key=settings.LLM_API_KEY,
-        )
-        
-        # Run analysis
-        analyzer = LLMAnalyzer(llm_provider)
-        llm_results = await analyzer.analyze_document(parsed_doc, existing_results)
-        
-        # Convert and save results
-        if llm_results:
-            validation_results = LLMAnalyzer.convert_to_validation_results(
-                llm_results, 
-                doc_service.get_document_id_by_task(task_id)
-            )
-            doc_service.save_validation_results(task_id, validation_results)
-        
-        logger.info(f"LLM analysis completed: {len(llm_results)} findings")
-        
-        return {"status": "llm_complete", "findings_count": len(llm_results)}
-        
-    except Exception as e:
-        logger.error(f"LLM analysis failed for task {task_id}: {e}")
-        # Graceful degradation: don't fail the whole task
-        return {"status": "llm_failed", "error": str(e)}
-    finally:
-        db.close()
-
-
-@celery_app.task
-def compile_results_task(task_id: int) -> Dict[str, Any]:
-    """Compile all results and mark task as complete."""
-    logger.info(f"Compiling results for task {task_id}")
-    
-    from app.db.session import get_db_session
-    from app.services.document_service import DocumentService
-    
-    try:
-        db = next(get_db_session())
-        doc_service = DocumentService(db)
-        
-        # Get all validation results
-        results = doc_service.get_validation_results(task_id)
-        
-        # Calculate summary statistics
-        total = len(results)
-        errors = sum(1 for r in results if r.status.value == "error")
-        warnings = sum(1 for r in results if r.status.value == "warning")
-        passed = total - errors - warnings
-        
-        # Update task status
-        doc_service.complete_task(task_id, {
-            "total_checks": total,
-            "errors": errors,
-            "warnings": warnings,
-            "passed": passed,
+        # Stage 1: Parse PDF
+        logger.info(f"Task {task_id}: Starting PDF parsing for {document.file_path}")
+        await broadcast_task_update(str(task_id), {
+            "stage": "parsing",
+            "progress": 10,
+            "message": "Извлечение текста и метаданных из PDF..."
         })
         
-        logger.info(f"Task {task_id} completed: {errors} errors, {warnings} warnings, {passed} passed")
+        parser = PDFParser()
+        parsed_data = await parser.parse(document.file_path)
+        
+        if not parsed_data:
+            raise ValueError("Failed to parse PDF")
+        
+        task.progress = 20
+        db.commit()
+        
+        # Stage 2: Rule-based checks
+        logger.info(f"Task {task_id}: Running rule engine with profile {profile_id}")
+        await broadcast_task_update(str(task_id), {
+            "stage": "rules",
+            "progress": 40,
+            "message": f"Проверка по профилю ЕСКД: {profile_id}"
+        })
+        
+        rule_engine = RuleEngine()
+        rule_results = await rule_engine.validate(parsed_data, profile_id)
+        all_results.extend(rule_results)
+        
+        task.progress = 50
+        db.commit()
+        
+        # Stage 3: Signature detection (CV + OCR)
+        logger.info(f"Task {task_id}: Detecting signatures and stamps")
+        await broadcast_task_update(str(task_id), {
+            "stage": "vision",
+            "progress": 65,
+            "message": "Поиск подписей и штампов..."
+        })
+        
+        signature_detector = SignatureDetector()
+        vision_results = await signature_detector.detect(document.file_path, parsed_data)
+        all_results.extend(vision_results)
+        
+        task.progress = 75
+        db.commit()
+        
+        # Stage 4: LLM semantic analysis (if enabled)
+        if settings.LLM_PROVIDER and settings.LLM_PROVIDER != "none":
+            logger.info(f"Task {task_id}: Running LLM semantic analysis")
+            await broadcast_task_update(str(task_id), {
+                "stage": "llm",
+                "progress": 85,
+                "message": "Семантический анализ текстовых требований..."
+            })
+            
+            llm_analyzer = LLMAnalyzer()
+            llm_results = await llm_analyzer.analyze(parsed_data, profile_id)
+            all_results.extend(llm_results)
+        
+        task.progress = 90
+        db.commit()
+        
+        # Stage 5: Save results to DB
+        logger.info(f"Task {task_id}: Saving {len(all_results)} results to database")
+        for result_data in all_results:
+            result = ValidationResult(
+                task_id=task_id,
+                rule_id=result_data.get('rule_id', ''),
+                description=result_data.get('description', ''),
+                status=result_data.get('status', 'unknown'),
+                details=result_data.get('details'),
+                page_ref=result_data.get('page_ref'),
+                gost_link=result_data.get('gost_link'),
+                confidence=result_data.get('confidence'),
+                check_type=result_data.get('check_type', '')
+            )
+            db.add(result)
+        db.commit()
+        
+        # Stage 6: Generate reports
+        logger.info(f"Task {task_id}: Generating reports")
+        await broadcast_task_update(str(task_id), {
+            "stage": "export",
+            "progress": 95,
+            "message": "Генерация отчётов DOCX и XLSX..."
+        })
+        
+        generator = ReportGenerator()
+        report_paths = generator.generate_reports(
+            document.original_filename,
+            all_results,
+            metadata
+        )
+        
+        # Update task with report paths
+        task.docx_report_path = report_paths.get('docx')
+        task.xlsx_report_path = report_paths.get('xlsx')
+        
+        # Finalize task
+        errors_count = sum(1 for r in all_results if r.get('status') == 'error')
+        warnings_count = sum(1 for r in all_results if r.get('status') == 'warning')
+        
+        task.status = TaskStatus.COMPLETED
+        task.progress = 100
+        task.errors_count = errors_count
+        task.warnings_count = warnings_count
+        task.completed_at = datetime.now()
+        db.commit()
+        
+        logger.info(f"Task {task_id} completed successfully with {errors_count} errors and {warnings_count} warnings")
+        
+        await broadcast_task_update(str(task_id), {
+            "stage": "completed",
+            "progress": 100,
+            "message": "Проверка завершена",
+            "results_summary": {
+                "total": len(all_results),
+                "errors": errors_count,
+                "warnings": warnings_count,
+                "passed": len(all_results) - errors_count - warnings_count
+            },
+            "reports": report_paths
+        })
         
         return {
+            "task_id": task_id,
             "status": "completed",
-            "summary": {
-                "total": total,
-                "errors": errors,
-                "warnings": warnings,
-                "passed": passed,
-            }
+            "results_count": len(all_results),
+            "errors": errors_count,
+            "warnings": warnings_count,
+            "reports": report_paths
         }
         
     except Exception as e:
-        logger.error(f"Failed to compile results for task {task_id}: {e}")
-        raise
-    finally:
-        db.close()
+        logger.exception(f"Task {task_id} failed with error: {e}")
+        task.status = TaskStatus.FAILED
+        task.error_message = str(e)
+        task.completed_at = datetime.now()
+        db.commit()
+        
+        await broadcast_task_update(str(task_id), {
+            "stage": "failed",
+            "progress": 0,
+            "message": f"Ошибка: {str(e)}"
+        })
+        
+        return {"task_id": task_id, "status": "failed", "error": str(e)}
+
+
+@celery_app.task(base=ValidationTaskBase, bind=True)
+async def cleanup_old_tasks(self, days: int = 30):
+    """Cleanup old completed/failed tasks and associated files."""
+    from datetime import timedelta
+    
+    cutoff_date = datetime.now() - timedelta(days=days)
+    
+    db = self.db
+    result = db.query(ValidationTask).filter(
+        ValidationTask.completed_at < cutoff_date
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    logger.info(f"Cleaned up {result} old tasks older than {days} days")
+    
+    return {"cleaned": result}
+
+
+__all__ = ["validate_document_task", "cleanup_old_tasks"]
